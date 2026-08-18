@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """Zero-dependency MCP server: expose Grok's (xAI) web search to MCP clients.
 
-Implements the Model Context Protocol (stdio transport, LSP-style
-Content-Length framing) using only the Python standard library, so it needs
-no pip install and works immediately. It shells out to the locally-installed
-`grok` CLI in headless mode, reusing the existing OAuth login in ~/.grok/auth.json.
+Implements the Model Context Protocol (stdio transport) using only the Python
+standard library, so it needs no pip install and works immediately. It shells
+out to the locally-installed `grok` CLI in headless mode, reusing the existing
+OAuth login in ~/.grok/auth.json.
+
+The stdio transport auto-detects framing:
+  - LSP-style `Content-Length` headers (original MCP framing)
+  - newline-delimited JSON (one JSON object per line, used by Claude Code)
 
 Run:
     python3 server.py            # serve MCP over stdio
@@ -23,7 +27,7 @@ import sys
 
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "grok-search"
-SERVER_VERSION = "0.2.0"
+SERVER_VERSION = "0.3.0"
 
 DEFAULT_TIMEOUT = int(os.environ.get("GROK_SEARCH_TIMEOUT", "180"))
 
@@ -50,12 +54,45 @@ def find_grok() -> str:
 
 
 # ---------------------------------------------------------------------------
-# MCP stdio transport: fixed header `Content-Length: <n>\r\n\r\n` + JSON body.
+# MCP stdio transport. Supports two frame encodings which hosts use:
+#   - LSP-style headers: `Content-Length: <n>\r\n\r\n` + JSON body
+#   - newline-delimited JSON: one JSON object per line (used by Claude Code)
+# The mode is detected on the first inbound message and mirrored on writes so
+# the client can always parse our responses.
 # ---------------------------------------------------------------------------
+FRAMING = {"mode": "lsp"}
+
+
 def read_message() -> dict | None:
     """Read one JSON-RPC message from stdin. Returns None on clean EOF."""
+    # Peek the first non-empty line to decide the framing.
+    first = sys.stdin.buffer.readline()
+    if not first:
+        return None
+    first = first.strip()
+    if not first:
+        # Leading blank line(s) precede an LSP header block; skip them.
+        while True:
+            line = sys.stdin.buffer.readline()
+            if not line:
+                return None
+            line = line.strip()
+            if line:
+                break
+        first = line
+
+    if first.startswith(b"{"):
+        # Newline-delimited JSON: the whole line is the message.
+        FRAMING["mode"] = "ndjson"
+        return json.loads(first.decode("utf-8"))
+
+    # LSP-style framing: parse `Content-Length` headers.
     content_length = None
+    line = first
     while True:
+        key, _, val = line.partition(b":")
+        if key.strip().lower() == b"content-length":
+            content_length = int(val.strip())
         line = sys.stdin.buffer.readline()
         if not line:
             return None
@@ -63,9 +100,6 @@ def read_message() -> dict | None:
         if not line:
             # blank line ends headers
             break
-        key, _, val = line.partition(b":")
-        if key.strip().lower() == b"content-length":
-            content_length = int(val.strip())
     if content_length is None:
         return None
     body = sys.stdin.buffer.read(content_length)
@@ -76,8 +110,12 @@ def read_message() -> dict | None:
 
 def write_message(msg: dict) -> None:
     body = json.dumps(msg).encode("utf-8")
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8"))
-    sys.stdout.buffer.write(body)
+    if FRAMING["mode"] == "ndjson":
+        # Mirror the client's framing: newline-delimited JSON.
+        sys.stdout.buffer.write(body + b"\n")
+    else:
+        sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("utf-8"))
+        sys.stdout.buffer.write(body)
     sys.stdout.buffer.flush()
 
 

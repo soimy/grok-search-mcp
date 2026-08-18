@@ -19,7 +19,8 @@ already have from the [xAI Grok Build](https://docs.x.ai/) CLI.
 MCP client (Claude Code)
    │  MCP stdio: grok_search(query) / grok_fetch(url)
    ▼
-server.py   (Python stdlib only — hand-rolled MCP stdio transport)
+server.py   (Python stdlib only — hand-rolled MCP stdio transport;
+             auto-detects LSP Content-Length and newline-delimited JSON framing)
    │  subprocess
    ▼
 grok -p "<prompt>" --no-alt-screen --permission-mode bypassPermissions
@@ -81,6 +82,11 @@ approval on next startup).
 
 ## Notes / Caveats
 
+- **Transport framing**: the server auto-detects whether a client speaks
+  LSP-style `Content-Length` framing or newline-delimited JSON (one object per
+  line) and mirrors the same framing for its responses. Claude Code uses
+  newline-delimited JSON; earlier versions of this README described only the
+  `Content-Length` framing, which made Claude Code time out on connect.
 - **`--permission-mode bypassPermissions`**: the server runs `grok -p` as a
   non-interactive single-shot search, so it must skip permission prompts that
   would otherwise block headless use. This never grants file/network access
