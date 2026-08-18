@@ -8,23 +8,45 @@ no pip install and works immediately. It shells out to the locally-installed
 
 Run:
     python3 server.py            # serve MCP over stdio
-    GROK_BIN=... python3 server.py
+
+The `grok` CLI is located automatically via $GROK_BIN or $PATH; set GROK_BIN
+to override (e.g. GROK_BIN=/path/to/grok python3 server.py).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
-from pathlib import Path
 
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "grok-search"
-SERVER_VERSION = "0.1.0"
+SERVER_VERSION = "0.2.0"
 
-GROK_BIN = Path(os.environ.get("GROK_BIN", "/home/sym/.grok/bin/grok"))
 DEFAULT_TIMEOUT = int(os.environ.get("GROK_SEARCH_TIMEOUT", "180"))
+
+
+def find_grok() -> str:
+    """Locate the `grok` CLI.
+
+    Order of preference:
+      1. $GROK_BIN (explicit override)
+      2. The `grok` binary on $PATH
+    Raises a clear error if none is found.
+    """
+    explicit = os.environ.get("GROK_BIN")
+    if explicit:
+        return explicit
+    found = shutil.which("grok")
+    if found:
+        return found
+    raise RuntimeError(
+        "Could not find the `grok` CLI. Install it (e.g. `curl -fsSL "
+        "https://grok.dev/install | bash` or your package manager), put it on "
+        "$PATH, or set GROK_BIN=/path/to/grok."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -62,11 +84,31 @@ def write_message(msg: dict) -> None:
 # ---------------------------------------------------------------------------
 # Grok invocation
 # ---------------------------------------------------------------------------
+def find_grok() -> str:
+    """Locate the `grok` CLI.
+
+    Order of preference:
+      1. $GROK_BIN (explicit override)
+      2. The `grok` binary on $PATH
+    Raises a clear error if none is found.
+    """
+    explicit = os.environ.get("GROK_BIN")
+    if explicit:
+        return explicit
+    found = shutil.which("grok")
+    if found:
+        return found
+    raise RuntimeError(
+        "Could not find the `grok` CLI. Install it (e.g. `curl -fsSL "
+        "https://grok.dev/install | bash` or your package manager), put it on "
+        "$PATH, or set GROK_BIN=/path/to/grok."
+    )
+
+
 def run_grok(prompt: str, max_turns: int = 4) -> str:
-    if not GROK_BIN.exists():
-        raise RuntimeError(f"grok CLI not found at {GROK_BIN}")
+    grok_bin = find_grok()
     cmd = [
-        str(GROK_BIN),
+        grok_bin,
         "-p", prompt,
         "--no-alt-screen",
         "--permission-mode", "bypassPermissions",

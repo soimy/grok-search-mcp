@@ -31,7 +31,8 @@ xAI backend: built-in web_search + web_fetch + model
 ## Requirements
 
 - A local [`grok` CLI](https://docs.x.ai/docs/grok-cli) installation with an
-  OAuth login (`~/.grok/auth.json`).
+  OAuth login (`~/.grok/auth.json`). The server locates it via `$GROK_BIN` or
+  `$PATH`.
 - Python 3.10+.
 
 ## Usage
@@ -47,16 +48,29 @@ GROK_BIN=/path/to/grok GROK_SEARCH_TIMEOUT=180 python3 server.py
 
 ### 2. Register with Claude Code
 
+From the directory where you want the server available (adjust the commands to
+*your* clone and `grok` locations; the examples rely on `grok` being on
+`$PATH`):
+
 ```bash
-cd /home/sym/Repo   # your working directory
+# from the directory that will hold .mcp.json
 claude mcp add grok-search -s project \
-  -e GROK_BIN=/home/sym/.grok/bin/grok \
   -e GROK_SEARCH_TIMEOUT=180 \
-  -- python3 /home/sym/Repo/grok-search-mcp/server.py
+  -- python3 "$(pwd)/grok-search-mcp/server.py"
 ```
 
-This writes a project-scoped `.mcp.json`. **Restart the Claude Code session**
-so it connects to the server (new servers require approval on next startup).
+If `grok` is not on `$PATH`, point `GROK_BIN` at its absolute location:
+
+```bash
+claude mcp add grok-search -s project \
+  -e GROK_BIN=/absolute/path/to/grok \
+  -e GROK_SEARCH_TIMEOUT=180 \
+  -- python3 "$(pwd)/grok-search-mcp/server.py"
+```
+
+This writes a project-scoped `.mcp.json` (see `.mcp.json.example`). **Restart
+the Claude Code session** so it connects to the server (new servers require
+approval on next startup).
 
 ### 3. Available tools
 
@@ -67,8 +81,17 @@ so it connects to the server (new servers require approval on next startup).
 
 ## Notes / Caveats
 
+- **`--permission-mode bypassPermissions`**: the server runs `grok -p` as a
+  non-interactive single-shot search, so it must skip permission prompts that
+  would otherwise block headless use. This never grants file/network access
+  beyond what the search already needs; point `GROK_BIN` at your trusted
+  `grok` binary.
 - Each search is one independent headless `grok` run and takes ~13–30s (model
   generation time).
 - A non-zero exit from `grok` (e.g. hitting `--max-turns`) still surfaces any
   partial output instead of failing, for better robustness on long pages.
 - The `.mcp.json` registration is project-scoped. Use `-s user` for all projects.
+
+## License
+
+[MIT](LICENSE)
