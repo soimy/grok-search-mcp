@@ -157,24 +157,30 @@ def run_grok(prompt: str, max_turns: int = 3) -> str:
             "HOME": iso_home,
             "NO_COLOR": "1",
         }
+        # Use Popen (not subprocess.run) so we own the child pid and can kill the
+        # whole process group on timeout. Note: in Python 3.14 the TimeoutExpired
+        # re-raised by subprocess.run() no longer carries `.pid`, so we can't
+        # rely on it for os.killpg().
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            cwd=iso_home, env=env,
+            # Run in a fresh process group so a timed-out grok can be killed
+            # together with its worker/session processes (it spawns children).
+            start_new_session=True,
+        )
         try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=DEFAULT_TIMEOUT,
-                cwd=iso_home, env=env,
-                # Run in a fresh process group so a timed-out grok can be killed
-                # together with its worker/session processes (it spawns children).
-                start_new_session=True,
-            )
-        except subprocess.TimeoutExpired as exc:
+            out, err = proc.communicate(timeout=DEFAULT_TIMEOUT)
+        except subprocess.TimeoutExpired:
             # Kill the entire process group, not just the direct child.
             try:
-                os.killpg(exc.pid, signal.SIGKILL)
+                os.killpg(proc.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            proc.communicate()  # reap it so no zombie is left behind
             raise RuntimeError(f"grok search timed out after {DEFAULT_TIMEOUT}s")
     finally:
         shutil.rmtree(iso_home, ignore_errors=True)
-    out = proc.stdout.strip()
+    out = out.strip()
     # grok exits non-zero when it hits --max-turns or otherwise stops before a
     # clean single-turn answer; whatever it already produced is still useful.
     if proc.returncode != 0 and not out:
