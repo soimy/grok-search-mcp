@@ -22,8 +22,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import tempfile
 
 PROTOCOL_VERSION = "2025-06-18"
 SERVER_NAME = "grok-search"
@@ -122,44 +124,56 @@ def write_message(msg: dict) -> None:
 # ---------------------------------------------------------------------------
 # Grok invocation
 # ---------------------------------------------------------------------------
-def find_grok() -> str:
-    """Locate the `grok` CLI.
-
-    Order of preference:
-      1. $GROK_BIN (explicit override)
-      2. The `grok` binary on $PATH
-    Raises a clear error if none is found.
-    """
-    explicit = os.environ.get("GROK_BIN")
-    if explicit:
-        return explicit
-    found = shutil.which("grok")
-    if found:
-        return found
-    raise RuntimeError(
-        "Could not find the `grok` CLI. Install it (e.g. `curl -fsSL "
-        "https://grok.dev/install | bash` or your package manager), put it on "
-        "$PATH, or set GROK_BIN=/path/to/grok."
-    )
-
-
-def run_grok(prompt: str, max_turns: int = 4) -> str:
+def run_grok(prompt: str, max_turns: int = 3) -> str:
     grok_bin = find_grok()
     cmd = [
         grok_bin,
         "-p", prompt,
         "--no-alt-screen",
         "--permission-mode", "bypassPermissions",
+        "--no-memory",
         "--max-turns", str(max_turns),
         "--output-format", "plain",
     ]
+    # CRITICAL: the `grok` CLI discovers MCP servers from Claude Code's
+    # ~/.claude.json (and project .mcp.json). Since THIS server is registered
+    # there, every `grok -p` call would start ANOTHER instance of this server,
+    # which in turn calls `grok -p` again — infinite recursion, and searches
+    # never return. Isolate grok's HOME (carrying over the OAuth login from
+    # ~/.grok) and run it from an empty temp dir so it loads no MCP config at
+    # all. This matches what Claude Code's own MCP isolation expects.
+    iso_home = tempfile.mkdtemp(prefix="grok-search-mcp-")
     try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=DEFAULT_TIMEOUT,
-            env={**os.environ, "NO_COLOR": "1"},
+        iso_grok = os.path.join(iso_home, ".grok")
+        shutil.copytree(
+            os.path.join(os.path.expanduser("~"), ".grok"), iso_grok,
+            ignore=shutil.ignore_patterns(
+                "sessions", "memtrace", "logs", "relocations",
+                "marketplace-cache", "downloads", "*.lock",
+            ),
         )
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"grok search timed out after {DEFAULT_TIMEOUT}s")
+        env = {
+            **os.environ,
+            "HOME": iso_home,
+            "NO_COLOR": "1",
+        }
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=DEFAULT_TIMEOUT,
+                cwd=iso_home, env=env,
+                # Run in a fresh process group so a timed-out grok can be killed
+                # together with its worker/session processes (it spawns children).
+                start_new_session=True,
+            )
+        except subprocess.TimeoutExpired as exc:
+            # Kill the entire process group, not just the direct child.
+            try:
+                os.killpg(exc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            raise RuntimeError(f"grok search timed out after {DEFAULT_TIMEOUT}s")
+    finally:
+        shutil.rmtree(iso_home, ignore_errors=True)
     out = proc.stdout.strip()
     # grok exits non-zero when it hits --max-turns or otherwise stops before a
     # clean single-turn answer; whatever it already produced is still useful.
@@ -190,7 +204,7 @@ TOOLS = [
                 },
                 "max_turns": {
                     "type": "integer",
-                    "description": "Cap on Grok's agent search turns (default 4).",
+                    "description": "Cap on Grok's agent search turns (default 3).",
                 },
             },
             "required": ["query"],
@@ -220,13 +234,19 @@ def call_tool(name: str, arguments: dict) -> list[dict]:
         query = str(arguments.get("query", "")).strip()
         if not query:
             raise ValueError("query is required")
-        max_turns = int(arguments.get("max_turns", 4))
+        max_turns = int(arguments.get("max_turns", 3))
+        # Important: phrase this as a neutral research question and only *permit*
+        # web search. Hard commands like "you MUST search" or "use web search"
+        # push Grok into a multi-turn agentic search loop that never converges
+        # within a practical timeout, so calls end up returning nothing. Giving it
+        # permission ("may use web search") lets it answer directly when it already
+        # knows, and search only when the answer truly needs live information.
         prompt = (
-            "Use your web search tool to research the user's request. Present the "
-            "answer in Markdown, cite sources as `[source: URL]`, and clearly "
-            "separate established facts from uncertainties. For anything needing a "
-            "current/live answer, you MUST search rather than rely on memory.\n\n"
-            f"USER REQUEST:\n{query}"
+            "Answer the research question below in concise Markdown. Cite sources "
+            "as `[source: URL]` where relevant. If the question needs current or "
+            "live information, you may use web search; otherwise answer from "
+            "knowledge.\n\n"
+            f"RESEARCH QUESTION:\n{query}"
         )
         content = run_grok(prompt, max_turns=max_turns)
     elif name == "grok_fetch":
@@ -234,12 +254,12 @@ def call_tool(name: str, arguments: dict) -> list[dict]:
         if not url.startswith(("http://", "https://")):
             raise ValueError("url must start with http:// or https://")
         prompt = (
-            "Use your web fetch tool to read this URL and summarize its key content "
-            "in Markdown: facts, figures, and main points. If it cannot be read, say "
+            "Read the web page at the URL below and summarize its key content in "
+            "Markdown: facts, figures, and main points. If it cannot be read, say "
             "so plainly.\n\n"
             f"URL:\n{url}"
         )
-        content = run_grok(prompt, max_turns=4)
+        content = run_grok(prompt, max_turns=3)
     else:
         raise ValueError(f"unknown tool: {name}")
     return [{"type": "text", "text": content}]
